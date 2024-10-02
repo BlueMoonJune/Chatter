@@ -1,3 +1,5 @@
+import math
+from imaplib import Debug
 from random import random
 
 from pyray import *
@@ -6,6 +8,8 @@ from enum import Enum
 from abc import abstractmethod
 
 SCROLL_SPEED = 20
+
+focus = None
 
 class MouseEvent:
     def __init__(self, x, y):
@@ -46,11 +50,14 @@ class SizedElement:
         self.h = 0
         self.y = 0
         self.x = 0
-        self.parent = 0
+        self.parent = None
 
     def set_bounds(self, **kwargs):
         self.__dict__.update(**kwargs)
         print(self.x)
+
+    def update_bounds(self):
+        self.set_bounds(x=self.x, y=self.y, w=self.w, h=self.h)
 
     def draw(self):
         pass
@@ -60,9 +67,11 @@ class SizedElement:
 
 class VBox(SizedElement):
 
-    def __init__(self, *args: tuple[SizedElement, Fit]):
+    def __init__(self, *children: tuple[SizedElement, Fit]):
         super().__init__()
-        self.children = args
+        self.children = children
+        for (child, _) in children:
+            child.parent = self
 
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
@@ -103,9 +112,11 @@ class VBox(SizedElement):
 
 class HBox(SizedElement):
 
-    def __init__(self, *args: tuple[SizedElement, Fit]):
+    def __init__(self, *children: tuple[SizedElement, Fit]):
         super().__init__()
-        self.children = args
+        self.children = children
+        for (child, _) in children:
+            child.parent = self
 
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
@@ -144,10 +155,75 @@ class HBox(SizedElement):
                 continue
         return EventResult.PASS
 
+class VStretch(SizedElement):
+    def __init__(self, *children: tuple[SizedElement, Static]):
+        super().__init__()
+        self.children = children
+        for (child, _) in children:
+            child.parent = self
+
+    def set_bounds(self, **kwargs):
+        super().set_bounds(**kwargs)
+        print(kwargs)
+        y = self.y
+        for (child, size) in self.children:
+            child.set_bounds(y=y, x=self.x, h=size.size, w=self.w)
+            y += size.size
+            print(child.__dict__)
+        self.h = y - self.y
+        print(self.__dict__)
+
+    def mouse_input(self, event: MouseEvent):
+        print(self, "mouse_input", event)
+        for (child, _) in self.children:
+            if event.y < child.y + child.h:
+                res = child.mouse_input(event)
+                if res:
+                    return res
+                continue
+        return EventResult.PASS
+
+    def draw(self):
+        for (child, _) in self.children:
+            child.draw()
+
+class HStretch(SizedElement):
+    def __init__(self, *children: tuple[SizedElement, Static]):
+        super().__init__()
+        self.children = children
+        for (child, _) in children:
+            child.parent = self
+
+    def set_bounds(self, **kwargs):
+        super().set_bounds(**kwargs)
+        print(kwargs)
+        x = self.x
+        for (child, size) in self.children:
+            child.set_bounds(x=x, y=self.y, w=size.size, h=self.h)
+            x += size.size
+            print(child.__dict__)
+        self.w = x - self.x
+        print(self.__dict__)
+
+    def mouse_input(self, event: MouseEvent):
+        print(self, "mouse_input", event)
+        for (child, _) in self.children:
+            if event.x < child.x + child.w:
+                res = child.mouse_input(event)
+                if res:
+                    return res
+                continue
+        return EventResult.PASS
+
+    def draw(self):
+        for (child, _) in self.children:
+            child.draw()
+
 class ScrollContainer(SizedElement):
     def __init__(self, child):
         super().__init__()
         self.child = child
+        child.parent = self
 
     def set_bounds(self, **kwargs):
         oldx, oldy = self.x, self.y
@@ -167,33 +243,33 @@ class ScrollContainer(SizedElement):
         res = self.child.mouse_input(event)
         if res: return res
         if isinstance(event, ScrollEvent):
-            oldx, oldy = self.child.x, self.child.y
-            x, y = oldx, oldy
-            x = clamp(x + event.h * SCROLL_SPEED, self.x + self.w - self.child.w, self.x)
-            y = clamp(y + event.v * SCROLL_SPEED, self.y + self.h - self.child.h, self.y)
-            if x != oldx or y != oldy:
-                self.child.set_bounds(x=x, y=y)
-                return EventResult.SUCCESS
+            return self.scroll(event.h, event.v)
+
+    def scroll(self, v, h):
+        oldx, oldy = self.child.x, self.child.y
+        x, y = oldx, oldy
+        x = clamp(x + h * SCROLL_SPEED, self.x + self.w - self.child.w, self.x)
+        y = clamp(y + v * SCROLL_SPEED, self.y + self.h - self.child.h, self.y)
+        if x != oldx or y != oldy:
+            self.child.set_bounds(x=x, y=y)
+            return EventResult.SUCCESS
+
 
 class VScrollContainer(ScrollContainer):
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
         self.child.set_bounds(x=self.x, w=self.w)
 
-    def mouse_input(self, event: MouseEvent):
-        event.v += event.h
-        event.h = 0
-        super().mouse_input(event)
+    def scroll(self, v, h):
+        super().scroll(v + h, 0)
 
 class HScrollContainer(ScrollContainer):
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
         self.child.set_bounds(y=self.y, h=self.h)
 
-    def mouse_input(self, event: MouseEvent):
-        event.h += event.v
-        event.v = 0
-        super().mouse_input(event)
+    def scroll(self, v, h):
+        super().scroll(0, v + h)
 
 class DebugBox(SizedElement):
     def __init__(self, color: Color):
@@ -201,12 +277,21 @@ class DebugBox(SizedElement):
         self.color = color
 
     def draw(self):
-        draw_rectangle(int(self.x), int(self.y), int(self.w), int(self.h), self.color)
+        x, y, w, h = int(self.x), int(self.y), int(self.w), int(self.h)
+        if self == focus:
+            print("focus")
+            x += 10
+            y += 10
+            w -= 20
+            h -= 20
+        draw_rectangle(x, y, w, h, self.color)
 
     def mouse_input(self, event: MouseEvent):
+        global focus
         if isinstance(event, MouseButtonEvent) and event.b == 0 and event.s == 1:
             print(self.__dict__, "clicked")
-            self.color = Color(255, 255, 255, 255)
+            focus = self
+            print("get focus")
             return EventResult.SUCCESS
         return EventResult.PASS
 
@@ -220,7 +305,21 @@ class Image(SizedElement):
     def draw(self):
         draw_texture(self.image[0], int(self.x), int(self.y), WHITE)
 
+class ScalingTest(DebugBox):
+    def __init__(self, color):
+        super().__init__(color)
+        self.scale = Static(500)
 
+    def draw(self):
+        self.scale.size = math.sin(get_time()) * 100 + 300
+        self.parent.update_bounds()
+        super().draw()
+
+    def to_pair(self):
+        return self, self.scale
+
+class TextBox(SizedElement):
+    def __
 
 if __name__ == "__main__":
     init_window(1600, 900, "rayui test")
@@ -229,8 +328,18 @@ if __name__ == "__main__":
     root = HBox(
         (VBox(
             (DebugBox(RED), Static(50)),
-            (HScrollContainer(
-                Image(load_texture("image.png"))
+            (VScrollContainer(
+                VStretch(
+                    (DebugBox(RED), Static(300)),
+                    (DebugBox(YELLOW), Static(300)),
+                    (HBox(
+                        (DebugBox(RED), Fill(1)),
+                        ScalingTest(BLACK).to_pair(),
+                        (DebugBox(GREEN), Static(300)),
+                    ), Static(300)),
+                    (DebugBox(BLUE), Static(300)),
+                    (DebugBox(MAGENTA), Static(300)),
+                )
             ), Fill(1)),
             (DebugBox(PURPLE), Static(100)),
         ), Fill(1)),
@@ -258,6 +367,7 @@ if __name__ == "__main__":
 
 
         begin_drawing()
+        #clear_background(WHITE)
         root.draw()
         end_drawing()
 
