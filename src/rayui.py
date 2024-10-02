@@ -1,5 +1,5 @@
 import math
-from imaplib import Debug
+import os
 from random import random
 
 from pyray import *
@@ -7,9 +7,37 @@ import raylib
 from enum import Enum
 from abc import abstractmethod
 
+
+
 SCROLL_SPEED = 20
 
 focus = None
+
+scissor_stack = []
+orig_begin_scissor_mode = begin_scissor_mode
+def begin_scissor_mode(x, y, w, h):
+    l = len(scissor_stack)
+    if l > 0:
+        (x2, y2, w2, h2) = scissor_stack[-1]
+        w = min(x+w, x2+w2)
+        h = min(y+h, y2+h2)
+        x = max(x, x2)
+        y = max(y, y2)
+        w -= x
+        h -= y
+    scissor_stack.append((x, y, w, h))
+    orig_begin_scissor_mode(x, y, w, h)
+
+orig_end_scissor_mode = end_scissor_mode
+def end_scissor_mode():
+    scissor_stack.pop()
+    l = len(scissor_stack)
+    if l > 0:
+        orig_begin_scissor_mode(*scissor_stack[-1])
+    else:
+        orig_end_scissor_mode()
+
+
 
 class MouseEvent:
     def __init__(self, x, y):
@@ -31,6 +59,11 @@ class MouseButtonEvent(MouseEvent):
 class EventResult:
     PASS = 0
     SUCCESS = 1
+
+class ImageFit(Enum):
+    FIT = 0
+    FILL = 1
+    STRETCH = 2
 
 class Fit:
     pass
@@ -54,7 +87,6 @@ class SizedElement:
 
     def set_bounds(self, **kwargs):
         self.__dict__.update(**kwargs)
-        print(self.x)
 
     def update_bounds(self):
         self.set_bounds(x=self.x, y=self.y, w=self.w, h=self.h)
@@ -75,7 +107,6 @@ class VBox(SizedElement):
 
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
-        print("bounds")
         space = self.h
         weights = 0
         for (child, fit) in self.children:
@@ -102,7 +133,6 @@ class VBox(SizedElement):
             child.draw()
 
     def mouse_input(self, event: MouseEvent):
-        print(self, "mouse_input", event)
         for (child, _) in self.children:
             if event.y < child.y + child.h:
                 res = child.mouse_input(event)
@@ -146,14 +176,12 @@ class HBox(SizedElement):
             child.draw()
 
     def mouse_input(self, event: MouseEvent):
-        print(self, "mouse_input", event)
         for (child, _) in self.children:
             if event.x < child.x + child.w:
                 res = child.mouse_input(event)
                 if res:
                     return res
-                continue
-        return EventResult.PASS
+                return EventResult.PASS
 
 class VStretch(SizedElement):
     def __init__(self, *children: tuple[SizedElement, Static]):
@@ -164,24 +192,19 @@ class VStretch(SizedElement):
 
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
-        print(kwargs)
         y = self.y
         for (child, size) in self.children:
             child.set_bounds(y=y, x=self.x, h=size.size, w=self.w)
             y += size.size
-            print(child.__dict__)
         self.h = y - self.y
-        print(self.__dict__)
 
     def mouse_input(self, event: MouseEvent):
-        print(self, "mouse_input", event)
         for (child, _) in self.children:
             if event.y < child.y + child.h:
                 res = child.mouse_input(event)
                 if res:
                     return res
-                continue
-        return EventResult.PASS
+                return EventResult.PASS
 
     def draw(self):
         for (child, _) in self.children:
@@ -196,24 +219,19 @@ class HStretch(SizedElement):
 
     def set_bounds(self, **kwargs):
         super().set_bounds(**kwargs)
-        print(kwargs)
         x = self.x
         for (child, size) in self.children:
             child.set_bounds(x=x, y=self.y, w=size.size, h=self.h)
             x += size.size
-            print(child.__dict__)
         self.w = x - self.x
-        print(self.__dict__)
 
     def mouse_input(self, event: MouseEvent):
-        print(self, "mouse_input", event)
         for (child, _) in self.children:
             if event.x < child.x + child.w:
                 res = child.mouse_input(event)
                 if res:
                     return res
-                continue
-        return EventResult.PASS
+                return EventResult.PASS
 
     def draw(self):
         for (child, _) in self.children:
@@ -239,7 +257,6 @@ class ScrollContainer(SizedElement):
         end_scissor_mode()
 
     def mouse_input(self, event: MouseEvent):
-        print(event.__dict__)
         res = self.child.mouse_input(event)
         if res: return res
         if isinstance(event, ScrollEvent):
@@ -261,7 +278,7 @@ class VScrollContainer(ScrollContainer):
         self.child.set_bounds(x=self.x, w=self.w)
 
     def scroll(self, v, h):
-        super().scroll(v + h, 0)
+        return super().scroll(v + h, 0)
 
 class HScrollContainer(ScrollContainer):
     def set_bounds(self, **kwargs):
@@ -269,7 +286,7 @@ class HScrollContainer(ScrollContainer):
         self.child.set_bounds(y=self.y, h=self.h)
 
     def scroll(self, v, h):
-        super().scroll(0, v + h)
+        return super().scroll(0, v + h)
 
 class DebugBox(SizedElement):
     def __init__(self, color: Color):
@@ -279,7 +296,6 @@ class DebugBox(SizedElement):
     def draw(self):
         x, y, w, h = int(self.x), int(self.y), int(self.w), int(self.h)
         if self == focus:
-            print("focus")
             x += 10
             y += 10
             w -= 20
@@ -289,21 +305,23 @@ class DebugBox(SizedElement):
     def mouse_input(self, event: MouseEvent):
         global focus
         if isinstance(event, MouseButtonEvent) and event.b == 0 and event.s == 1:
-            print(self.__dict__, "clicked")
             focus = self
-            print("get focus")
             return EventResult.SUCCESS
         return EventResult.PASS
 
 class Image(SizedElement):
-    def __init__(self, image: Texture):
+    def __init__(self, image: Texture, fit: ImageFit):
         super().__init__()
         self.image = image,
         self.w = image.width
         self.h = image.height
 
     def draw(self):
-        draw_texture(self.image[0], int(self.x), int(self.y), WHITE)
+        img: Texture = self.image
+        imgrat = img.height/img.width
+        bndrat = self.h/self.w
+        scale = 0
+        draw_texture_pro(self.image[0], , WHITE)
 
 class ScalingTest(DebugBox):
     def __init__(self, color):
@@ -319,11 +337,20 @@ class ScalingTest(DebugBox):
         return self, self.scale
 
 class TextBox(SizedElement):
-    def __
+    def __init__(self):
+        super().__init__()
+        self.text = ""
+        self.edit = False
+
+    def draw(self):
+        if gui_text_box(Rectangle(self.x, self.y, self.w, self.h), self.text, len(self.text) + 100, self.edit):
+            self.edit = not self.edit
 
 if __name__ == "__main__":
     init_window(1600, 900, "rayui test")
     set_window_state(raylib.FLAG_WINDOW_RESIZABLE)
+
+    font = load_font_ex("..\\Roboto-Regular.ttf", 20, None, 0)
 
     root = HBox(
         (VBox(
@@ -332,11 +359,10 @@ if __name__ == "__main__":
                 VStretch(
                     (DebugBox(RED), Static(300)),
                     (DebugBox(YELLOW), Static(300)),
-                    (HBox(
-                        (DebugBox(RED), Fill(1)),
-                        ScalingTest(BLACK).to_pair(),
-                        (DebugBox(GREEN), Static(300)),
-                    ), Static(300)),
+                    (HScrollContainer(HStretch(
+                        (DebugBox(RED), Static(1000)),
+                        (DebugBox(GREEN), Static(1000)),
+                    )), Static(300)),
                     (DebugBox(BLUE), Static(300)),
                     (DebugBox(MAGENTA), Static(300)),
                 )
@@ -365,10 +391,20 @@ if __name__ == "__main__":
         if not scroll.x == scroll.y == 0:
             root.mouse_input(ScrollEvent(x, y, scroll.y, scroll.x))
 
+        if focus:
+            if key := get_key_pressed():
+                char = chr(get_char_pressed())
+                scan = glfw_get_key_scancode(key)
+                print((key, char, 1))
+
+        poll_input_events()
+
 
         begin_drawing()
-        #clear_background(WHITE)
+        clear_background(WHITE)
         root.draw()
+        draw_text_ex(font, "lorem ipsum dolor sit amet", Vector2(0, 0), 20, 0, BLACK)
+        draw_text_ex(font, str(measure_text_ex(font, "lorem ipsum dolor sit amet", 20, 0).x), Vector2(0, 20), 20, 0, BLACK)
         end_drawing()
 
     close_window()
